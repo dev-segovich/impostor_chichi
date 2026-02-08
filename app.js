@@ -367,7 +367,10 @@ function finishGame() {
     switchScreen('singleGame');
 }
 
-// Multi Phone Game
+// Multi Phone Game Logic
+let pollInterval = null;
+const API_URL = 'server.php';
+
 function handleMultiSetup() {
     const input = document.getElementById('my-player-name');
     const name = input.value.trim();
@@ -375,42 +378,169 @@ function handleMultiSetup() {
     if (name) {
         gameState.myPlayerName = name;
         switchScreen('multiGame');
-        generateGameCode();
-        
-        // Add self to list
-        const playerList = document.getElementById('players-list');
-        playerList.innerHTML = `
-            <div class="player-item">${name} (Tú)</div>
-        `;
+        startPolling();
     } else {
         input.style.border = '2px solid red';
         setTimeout(() => input.style.border = '', 2000);
     }
 }
 
-function generateGameCode() {
-    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-    document.getElementById('game-code').textContent = code;
+function startPolling() {
+    // Initial Join
+    fetch(`${API_URL}?action=join&name=${encodeURIComponent(gameState.myPlayerName)}`)
+        .then(res => res.json())
+        .then(data => updateMultiUI(data))
+        .catch(err => console.error('Error joining room:', err));
+
+    // Poll every 2 seconds
+    if (pollInterval) clearInterval(pollInterval);
+    pollInterval = setInterval(() => {
+        fetch(`${API_URL}?action=poll&name=${encodeURIComponent(gameState.myPlayerName)}`)
+            .then(res => res.json())
+            .then(data => {
+                updateMultiUI(data);
+                checkGameState(data);
+            })
+            .catch(err => console.error('Polling error:', err));
+    }, 2000);
 }
 
-function copyGameLink() {
-    const code = document.getElementById('game-code').textContent;
-    const link = `${window.location.origin}${window.location.pathname}?game=${code}`;
+function updateMultiUI(data) {
+    const list = document.getElementById('players-list');
+    const count = document.getElementById('connected-count');
     
-    navigator.clipboard.writeText(link).then(() => {
-        const btn = document.getElementById('copy-link-btn');
-        const originalText = btn.textContent;
-        btn.textContent = '✓ Invitación Copiada';
-        setTimeout(() => {
-            btn.textContent = originalText;
-        }, 2000);
-    }).catch(() => {
-        alert('No se pudo copiar el enlace');
+    // Update count
+    count.textContent = data.players.length;
+    gameState.playerCount = data.players.length; // Sync count for logic
+    
+    // Update visual list
+    list.innerHTML = '';
+    data.players.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'player-item';
+        div.textContent = p.name + (p.name === gameState.myPlayerName ? ' (Tú)' : '');
+        if (p.name === gameState.myPlayerName) {
+            div.style.background = 'hsl(280, 70%, 95%)';
+            div.style.fontWeight = 'bold';
+        }
+        list.appendChild(div);
     });
+
+    // Update Start Button (only if enough players)
+    const startBtn = document.getElementById('start-multi-game');
+    if (data.players.length < 3) {
+        startBtn.disabled = true;
+        startBtn.textContent = `Esperando jugadores (${data.players.length}/3)`;
+    } else {
+        startBtn.disabled = false;
+        startBtn.textContent = 'Iniciar Juego para Todos';
+    }
 }
 
 function startMultiPhoneGame() {
-    alert('Funcionalidad multi-teléfono en desarrollo. Por ahora, usa el modo de un solo teléfono.');
+    // Host logic: Generate roles and send to server
+    // 1. Get current players from state (we rely on last poll, but lets fetch fresh)
+    fetch(`${API_URL}?action=poll&name=${encodeURIComponent(gameState.myPlayerName)}`)
+        .then(res => res.json())
+        .then(data => {
+            const players = data.players.map(p => p.name);
+            const impostorCount = 1; // Default for now
+            
+            // Generate assignments
+            const word = wordManager.getRandomUnusedWord(WORD_BANK);
+            const rolesList = generateRoles(players.length, impostorCount);
+            
+            // Map roles to specific names
+            const gameData = {};
+            players.forEach((name, index) => {
+                gameData[name] = {
+                    role: rolesList[index],
+                    word: rolesList[index] === 'impostor' ? null : word
+                };
+            });
+            
+            // Send to server
+            fetch(`${API_URL}?action=start`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(gameData)
+            });
+        });
+}
+
+function checkGameState(data) {
+    if (data.status === 'playing' && data.gameData) {
+        // Game Started!
+        const myData = data.gameData[gameState.myPlayerName];
+        if (myData) {
+            clearInterval(pollInterval); // Stop polling
+            showMyRole(myData);
+        }
+    }
+}
+
+function showMyRole(myData) {
+    const roleDisplay = document.getElementById('role-display');
+    
+    // Reset classes
+    roleDisplay.classList.remove('role-impostor', 'role-innocent');
+    
+    if (myData.role === 'impostor') {
+        roleDisplay.classList.add('role-impostor');
+        roleDisplay.innerHTML = `
+            <div class="role-icon">😈</div>
+            <h2 class="role-text">¡Eres el IMPOSTOR!</h2>
+            <p class="role-instruction">No tienes palabra. Descubre cuál es sin que te descubran.</p>
+        `;
+    } else {
+        roleDisplay.classList.add('role-innocent');
+        roleDisplay.innerHTML = `
+            <div class="role-icon">😇</div>
+            <h2 class="role-text">Eres Inocente</h2>
+            <div class="secret-word">
+                <p class="word-label">Tu palabra es:</p>
+                <p class="word-display">${myData.word}</p>
+            </div>
+            <p class="role-instruction">Describe esta palabra sin decirla directamente.</p>
+        `;
+    }
+    
+    // Customize reveal screen for Multi Mode
+    document.getElementById('player-turn-display').style.display = 'none'; // No turns in multi
+    document.getElementById('next-player-btn').style.display = 'none';
+    
+    // New "New Game" button for multi
+    let resetBtn = document.getElementById('reset-multi-btn');
+    if (!resetBtn) {
+        resetBtn = document.createElement('button');
+        resetBtn.id = 'reset-multi-btn';
+        resetBtn.className = 'btn btn-primary';
+        resetBtn.textContent = 'Nueva Partida';
+        resetBtn.style.marginTop = '20px';
+        resetBtn.addEventListener('click', resetMultiGame);
+        document.querySelector('.reveal-card').appendChild(resetBtn);
+    }
+    resetBtn.style.display = 'block';
+    
+    switchScreen('reveal');
+}
+
+function resetMultiGame() {
+    fetch(`${API_URL}?action=reset`)
+        .then(() => {
+            switchScreen('multiGame');
+            startPolling();
+        });
+}
+
+function copyGameLink() {
+   // Just copy the URL without query params
+   const url = window.location.href.split('?')[0];
+    navigator.clipboard.writeText(url).then(() => {
+        const btn = document.getElementById('copy-link-btn');
+        btn.textContent = '✓ URL Copiada';
+        setTimeout(() => btn.textContent = '🔗 Copiar Enlace', 2000);
+    });
 }
 
 // Screen Management
